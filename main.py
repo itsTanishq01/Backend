@@ -7,6 +7,8 @@ from PIL import Image
 import io
 import os
 import uvicorn
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Disable GPU
 
 app = FastAPI(title="AgriSense API")
 
