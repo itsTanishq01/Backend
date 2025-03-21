@@ -2,12 +2,13 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import tensorflow as tf
 import numpy as np
+import pickle
 from PIL import Image
 import io
 import os
 import uvicorn
 
-app = FastAPI(title="Plant Disease Detection API")
+app = FastAPI(title="AgriSense API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,25 +18,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_PATH = "crop_disease_model.keras"
+MODEL_PATHS = {
+    "disease": "crop_disease_model.keras",
+    "soil": "Soil.pkl",
+    "crop": "Crop.pkl"
+}
+
 IMG_SIZE = 128
 
 PLANT_DISEASES = [
     'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
-    'Blueberry___healthy',
-    'Cherry_(including_sour)___Powdery_mildew', 'Cherry_(including_sour)___healthy',
+    'Blueberry___healthy', 'Cherry_(including_sour)___Powdery_mildew', 'Cherry_(including_sour)___healthy',
     'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot', 'Corn_(maize)___Common_rust_', 
     'Corn_(maize)___Northern_Leaf_Blight', 'Corn_(maize)___healthy',
     'Grape___Black_rot', 'Grape___Esca_(Black_Measles)', 'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)', 
-    'Grape___healthy',
-    'Orange___Haunglongbing_(Citrus_greening)',
+    'Grape___healthy', 'Orange___Haunglongbing_(Citrus_greening)',
     'Peach___Bacterial_spot', 'Peach___healthy',
     'Pepper,_bell___Bacterial_spot', 'Pepper,_bell___healthy',
     'Potato___Early_blight', 'Potato___Late_blight', 'Potato___healthy',
-    'Raspberry___healthy',
-    'Soybean___healthy',
-    'Squash___Powdery_mildew',
-    'Strawberry___Leaf_scorch', 'Strawberry___healthy',
+    'Raspberry___healthy', 'Soybean___healthy',
+    'Squash___Powdery_mildew', 'Strawberry___Leaf_scorch', 'Strawberry___healthy',
     'Tomato___Bacterial_spot', 'Tomato___Early_blight', 'Tomato___Late_blight', 'Tomato___Leaf_Mold', 
     'Tomato___Septoria_leaf_spot', 'Tomato___Spider_mites Two-spotted_spider_mite', 
     'Tomato___Target_Spot', 'Tomato___Tomato_Yellow_Leaf_Curl_Virus', 'Tomato___Tomato_mosaic_virus',
@@ -69,28 +71,30 @@ DISEASE_DATABASE = {
     }
 }
 
-model = None
+models = {}
 
 @app.on_event("startup")
-async def load_model():
-    global model
+async def load_models():
+    global models
     try:
-        if os.path.exists(MODEL_PATH):
-            model = tf.keras.models.load_model(MODEL_PATH)
-            print(f"Model successfully loaded from {MODEL_PATH}")
-        else:
-            print(f"Model file not found at {MODEL_PATH}")
+        models["disease"] = tf.keras.models.load_model(MODEL_PATHS["disease"])
+        with open(MODEL_PATHS["soil"], "rb") as f:
+            models["soil"] = pickle.load(f)
+        with open(MODEL_PATHS["crop"], "rb") as f:
+            models["crop"] = pickle.load(f)
+        print("✅ All models loaded successfully!")
     except Exception as e:
-        print(f"Error loading model: {str(e)}")
+        print(f"❌ Error loading models: {e}")
 
 @app.get("/")
 async def home():
     return {
-        "api_name": "Plant Disease Detection API",
+        "api_name": "AgriSense API",
         "status": "active",
         "endpoints": {
-            "/predict": "POST - Upload an image for disease detection",
-            "/": "GET - API information"
+            "/predict/disease": "POST - Upload an image for disease detection",
+            "/predict/soil": "POST - JSON input for soil health prediction",
+            "/predict/crop": "POST - JSON input for crop recommendation"
         }
     }
 
@@ -106,39 +110,53 @@ def fetch_disease_info(disease_code):
             'treatment': 'Seek guidance from agricultural specialists.'
         }
 
-@app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    if not file:
-        raise HTTPException(status_code=400, detail="No image uploaded")
+@app.post("/predict/disease")
+async def predict_disease(file: UploadFile = File(...)):
+    if models["disease"] is None:
+        raise HTTPException(status_code=503, detail="Disease model is not available.")
     
-    if model is None:
-        raise HTTPException(status_code=503, detail="Model is not available. Try again later.")
-    
-    try:
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents))
-        image = image.resize((IMG_SIZE, IMG_SIZE))
-        img_array = np.array(image)
-        img_array = np.expand_dims(img_array, axis=0)
-        
-        predictions = model.predict(img_array)
-        predicted_class_idx = np.argmax(predictions[0])
-        confidence = float(predictions[0][predicted_class_idx])
-        
-        disease_code = PLANT_DISEASES[predicted_class_idx]
-        disease_info = fetch_disease_info(disease_code)
-        
-        return {
-            "prediction": {
-                "disease_code": disease_code,
-                "disease_name": disease_info["name"],
-                "confidence": round(confidence * 100, 2)
-            },
-            "details": disease_info,
-            "status": "success"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+    contents = await file.read()
+    image = Image.open(io.BytesIO(contents)).convert("RGB")
+    image = image.resize((IMG_SIZE, IMG_SIZE))
+    img_array = np.array(image) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+
+    predictions = models["disease"].predict(img_array)
+    predicted_class_idx = np.argmax(predictions[0])
+    confidence = float(predictions[0][predicted_class_idx])
+
+    disease_code = PLANT_DISEASES[predicted_class_idx]
+    disease_info = fetch_disease_info(disease_code)
+
+    return {
+        "prediction": {
+            "disease_code": disease_code,
+            "disease_name": disease_info["name"],
+            "confidence": round(confidence * 100, 2)
+        },
+        "details": disease_info,
+        "status": "success"
+    }
+
+@app.post("/predict/soil")
+async def predict_soil(data: dict):
+    if models["soil"] is None:
+        raise HTTPException(status_code=503, detail="Soil model is not available.")
+
+    input_features = np.array([data[key] for key in data.keys()]).reshape(1, -1)
+    prediction = models["soil"].predict(input_features)
+
+    return {"soil_health_score": float(prediction[0])}
+
+@app.post("/predict/crop")
+async def recommend_crop(data: dict):
+    if models["crop"] is None:
+        raise HTTPException(status_code=503, detail="Crop model is not available.")
+
+    input_features = np.array([data[key] for key in data.keys()]).reshape(1, -1)
+    prediction = models["crop"].predict(input_features)
+
+    return {"recommended_crop": str(prediction[0])}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
