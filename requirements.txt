@@ -3,6 +3,4 @@ uvicorn
 tensorflow
 numpy
 pillow
-scikit-learn
 python-multipart
-lightgbm
